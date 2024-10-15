@@ -1,5 +1,6 @@
-from pydantic import SecretStr
+import base64
 from datetime import datetime, timedelta
+from pydantic import SecretStr
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,13 +18,19 @@ from lecture_4.demo_service.api.contracts import (
     RegisterUserRequest,
 )
 
-app = create_app()
-client = TestClient(app)
-
-TEST_PASSWORD = "testPassword"
+TEST_PASSWORD = "012345678"
 TEST_USERNAME = "testUsername"
 TEST_NAME = "testName"
 TEST_BIRTHDATE = datetime.now()
+
+
+def encode_credentials(username, password):
+    credentials = f"{username}:{password}"
+    encoded_credentials = base64.b64encode(credentials.encode()).decode()
+    return encoded_credentials
+
+
+############################ FIXTURES ############################
 
 
 @pytest.fixture()
@@ -82,6 +89,14 @@ def register_user_request():
 
 
 @pytest.fixture()
+def register_user_request_json(register_user_request: RegisterUserRequest):
+    request_data = register_user_request.model_dump()
+    request_data["birthdate"] = register_user_request.birthdate.isoformat()
+    request_data["password"] = register_user_request.password.get_secret_value()
+    return request_data
+
+
+@pytest.fixture()
 def user_response():
     """
     Fixture to generate a test UserResponse object with a valid username and password.
@@ -103,10 +118,34 @@ def user_authorisation_request():
     return UserAuthRequest(username=TEST_USERNAME, password=SecretStr(TEST_PASSWORD))
 
 
+@pytest.fixture()
+def demo_service_instance():
+    """
+    Fixture to create a test instance of the FastAPI application
+    """
+    application = create_app()
+    with TestClient(application) as client_instance:
+        yield client_instance
+
+
+@pytest.fixture()
+def correct_authorization_headers():
+    """
+    Fixture to generate a valid Authorization header for a request.
+    """
+    return {
+        "Authorization": f"Basic {encode_credentials(TEST_USERNAME, TEST_PASSWORD)}"
+    }
+
+
+############################# TEST CORE FUNCTIONS AND DATACLASSES ############################
+
+
 def test_successfull_creation():
     """
     Ensures that the app can be successfully created.
     """
+    app = create_app()
     assert app is not None
 
 
@@ -163,6 +202,9 @@ def test_password_is_longer_than_8():
     assert password_is_longer_than_8("012345678")
 
 
+############################## TEST CONTRACTS ############################
+
+
 def test_register_user_request(register_user_request: RegisterUserRequest):
     assert register_user_request.username == TEST_USERNAME
     assert register_user_request.name == TEST_NAME
@@ -188,3 +230,173 @@ def test_user_response(user_response: UserResponse, user_entity: UserEntity):
 def test_user_auth_request(user_authorisation_request: UserAuthRequest):
     assert user_authorisation_request.username == TEST_USERNAME
     assert user_authorisation_request.password == SecretStr(TEST_PASSWORD)
+
+
+############################ TEST API #########################
+
+
+def test_register_user(
+    demo_service_instance: TestClient,
+    register_user_request_json: dict,
+    user_response: UserResponse,
+):
+
+    response = demo_service_instance.post(
+        "/user-register", json=register_user_request_json
+    )
+    assert response.status_code == 200
+    assert response.json().get("name") == user_response.name
+    assert response.json().get("username") == user_response.username
+    assert response.json().get("role") == user_response.role
+    assert datetime.fromisoformat(response.json().get("birthdate")) == TEST_BIRTHDATE
+
+def test_register_user_twice(
+    demo_service_instance: TestClient,
+    register_user_request_json: dict,
+):
+
+    _ = demo_service_instance.post(
+        "/user-register", json=register_user_request_json
+    )
+    response = demo_service_instance.post(
+        "/user-register", json=register_user_request_json
+    )
+    assert response.status_code == 400
+
+
+def test_get_user_correct(
+    demo_service_instance: TestClient,
+    register_user_request_json: dict[str, str],
+    user_response: UserResponse,
+    correct_authorization_headers: dict[str, str],
+):
+
+    post_response = demo_service_instance.post(
+        "/user-register", json=register_user_request_json
+    )
+    response = demo_service_instance.post(
+        "/user-get",
+        params={"id": post_response.json().get("uid")},
+        headers=correct_authorization_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json().get("name") == user_response.name
+    assert response.json().get("username") == user_response.username
+    assert response.json().get("role") == user_response.role
+    assert datetime.fromisoformat(response.json().get("birthdate")) == TEST_BIRTHDATE
+
+
+def test_get_user_missed_headers(
+    demo_service_instance: TestClient,
+    register_user_request_json: dict[str, str],
+    user_entity: UserEntity,
+):
+
+    _ = demo_service_instance.post("/user-register", json=register_user_request_json)
+    response = demo_service_instance.post(
+        "/user-get", json={"id": user_entity.uid, "username": user_entity.info.username}
+    )
+    assert response.status_code == 401
+
+
+def test_get_user_both_id_and_username(
+    demo_service_instance: TestClient,
+    register_user_request_json: dict[str, str],
+    user_entity: UserEntity,
+    correct_authorization_headers: dict[str, str],
+):
+    _ = demo_service_instance.post("/user-register", json=register_user_request_json)
+    response = demo_service_instance.post(
+        "/user-get",
+        params={"id": user_entity.uid, "username": user_entity.info.username},
+        headers=correct_authorization_headers,
+    )
+
+    assert response.status_code == 400
+
+
+def test_get_user_user_not_exist(
+    demo_service_instance: TestClient,
+    register_user_request_json: dict[str, str],
+    correct_authorization_headers: dict[str, str],
+):
+    post_response = demo_service_instance.post(
+        "/user-register", json=register_user_request_json
+    )
+    response = demo_service_instance.post(
+        "/user-get",
+        params={"username": post_response.json().get("username") + "1"},
+        headers=correct_authorization_headers,
+    )
+
+    assert response.status_code == 404
+
+    response = demo_service_instance.post(
+        "/user-get",
+        params={"id": post_response.json().get("uid") + 1},
+        headers=correct_authorization_headers,
+    )
+
+    assert response.status_code == 404
+
+
+def test_get_user_no_username_and_id(
+    demo_service_instance: TestClient,
+    correct_authorization_headers: dict[str, str],
+    register_user_request_json: dict[str, str],
+):
+    _ = demo_service_instance.post("/user-register", json=register_user_request_json)
+    response = demo_service_instance.post(
+        "/user-get", params={}, headers=correct_authorization_headers
+    )
+    assert response.status_code == 400
+
+
+def test_get_user_wrong_headers(
+    demo_service_instance: TestClient,
+    register_user_request_json: dict[str, str],
+):
+    post_response = demo_service_instance.post(
+        "/user-register", json=register_user_request_json
+    )
+    response = demo_service_instance.post(
+        "/user-get",
+        params={"id": post_response.json().get("uid")},
+        headers={
+            "Authorization": f"Basic {encode_credentials(TEST_USERNAME + '5', TEST_PASSWORD + '1')}"
+        },
+    )
+
+    assert response.status_code == 401
+
+
+def test_promote_user(
+    demo_service_instance,
+    register_user_request_json,
+    correct_authorization_headers,
+    register_user_request,
+):
+
+    admin_auth_headers = {
+        "Authorization": f"Basic {encode_credentials('admin', 'superSecretAdminPassword123')}"
+    }
+
+    response_user = demo_service_instance.post(
+        "/user-register", json=register_user_request_json
+    )
+    assert response_user.status_code == 200
+
+    response = demo_service_instance.post(
+        "/user-promote",
+        params={"id": response_user.json().get("uid")},
+        headers=correct_authorization_headers,
+    )
+    assert response.status_code == 403
+
+    response = demo_service_instance.post(
+        "/user-promote",
+        params={"id": response_user.json().get("uid")},
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 200
