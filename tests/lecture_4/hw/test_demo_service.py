@@ -263,6 +263,15 @@ def test_register_user_twice(
     )
     assert response.status_code == 400
 
+def test_register_user_short_password(
+    demo_service_instance: TestClient,
+    register_user_request_json: dict,
+):
+    register_user_request_json["password"] = "0123"
+    response = demo_service_instance.post(
+        "/user-register", json=register_user_request_json
+    )
+    assert response.status_code == 400
 
 def test_get_user_correct(
     demo_service_instance: TestClient,
