@@ -286,6 +286,18 @@ def test_get_user_correct(
     assert response.json().get("role") == user_response.role
     assert datetime.fromisoformat(response.json().get("birthdate")) == TEST_BIRTHDATE
 
+    response = demo_service_instance.post(
+        "/user-get",
+        params={"username": post_response.json().get("username")},
+        headers=correct_authorization_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json().get("name") == user_response.name
+    assert response.json().get("username") == user_response.username
+    assert response.json().get("role") == user_response.role
+    assert datetime.fromisoformat(response.json().get("birthdate")) == TEST_BIRTHDATE
+
 
 def test_get_user_missed_headers(
     demo_service_instance: TestClient,
